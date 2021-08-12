@@ -4,6 +4,8 @@ import android.content.Intent
 import android.net.Uri
 import android.os.Bundle
 import androidx.fragment.app.Fragment
+import androidx.lifecycle.lifecycleScope
+import kotlinx.coroutines.launch
 
 class MainFragment : Fragment() {
     override fun onActivityCreated(savedInstanceState: Bundle?) {
@@ -11,7 +13,10 @@ class MainFragment : Fragment() {
         val routerRetrofit = RouterRetrofit.Builder()
             .build(requireContext())
         val routerService = routerRetrofit.create(RouterService::class.java)
-        routerService.startTestUri(requireContext(),"app://test.uri.activity",22,Intent.ACTION_VIEW)
+//        routerService.startTestUri(requireContext(),"app://test.uri.activity",22,Intent.ACTION_VIEW)
+        lifecycleScope.launch {
+            routerService.startTestUriSuspend(requireContext(),"app://test.uri.activity")
+        }
 //        routerService.startTestUri(this, "app://test.uri.activity/fragment",22,Intent.ACTION_VIEW)
     }
 

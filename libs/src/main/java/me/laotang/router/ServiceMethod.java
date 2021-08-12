@@ -13,6 +13,7 @@ import java.lang.reflect.Method;
 import java.lang.reflect.ParameterizedType;
 import java.lang.reflect.Type;
 
+import kotlin.coroutines.Continuation;
 import me.laotang.router.annotation.Action;
 import me.laotang.router.annotation.Bundles;
 import me.laotang.router.annotation.Extra;
@@ -27,9 +28,10 @@ final class ServiceMethod<R, T> {
     private final RawCall.Factory callFactory;
     private final CallAdapter<R, T> callAdapter;
     private final ParameterHandler<?>[] parameterHandlers;
-    String relativeUrl;
-    int mFlags;
-    boolean isGreenChannel;
+    private final String relativeUrl;
+    private final int mFlags;
+    private final boolean isGreenChannel;
+    private final boolean isKotlinSuspendFunction;
 
     ServiceMethod(Builder<R, T> builder) {
         this.callFactory = builder.retrofit.callFactory();
@@ -38,6 +40,7 @@ final class ServiceMethod<R, T> {
         this.relativeUrl = builder.relativeUrl;
         this.mFlags = builder.mFlags;
         this.isGreenChannel = builder.isGreenChannel;
+        this.isKotlinSuspendFunction = builder.isKotlinSuspendFunction;
     }
 
     RawCall toCall(Object... args) {
@@ -49,12 +52,24 @@ final class ServiceMethod<R, T> {
                     + ") doesn't match expected count (" + handlers.length + ")");
         }
         for (int p = 0; p < argumentCount; p++) {
-            handlers[p].apply(requestBuilder, args[p]);
+            if (handlers[p] != null) {
+                handlers[p].apply(requestBuilder, args[p]);
+            }
         }
         return callFactory.newCall(requestBuilder.build());
     }
 
-    T adapt(Call<R> call) {
+    Object adapt(Call<R> call, Object[] args) {
+        if(isKotlinSuspendFunction){
+            //是协程 挂起函数
+            Continuation<T> continuation = (Continuation<T>) args[args.length - 1];
+            try {
+                SuspendCall rawCall = (SuspendCall) callAdapter.adapt(call);
+                return  KotlinExtensionsKt.await(rawCall,continuation);
+            } catch (Exception e) {
+                return  KotlinExtensionsKt.suspendAndThrow(e, continuation);
+            }
+        }
         return callAdapter.adapt(call);
     }
 
@@ -73,6 +88,7 @@ final class ServiceMethod<R, T> {
         ParameterHandler<?>[] parameterHandlers;
         Type responseType;
         CallAdapter<T, R> callAdapter;
+        boolean isKotlinSuspendFunction;
 
         Builder(RouterRetrofit retrofit, Method method) {
             this.retrofit = retrofit;
@@ -83,33 +99,53 @@ final class ServiceMethod<R, T> {
         }
 
         public ServiceMethod build() {
-            callAdapter = createCallAdapter();
-            responseType = callAdapter.responseType();
 
+            //解析方法注解
             for (Annotation annotation : methodAnnotations) {
                 parseMethodAnnotation(annotation);
             }
 
+            //解析参数类型以及注解
             int parameterCount = parameterAnnotationsArray.length;
             parameterHandlers = new ParameterHandler<?>[parameterCount];
 
-            for (int p = 0; p < parameterCount; p++) {
+            for (int p = 0, lastParameter = parameterCount - 1; p < parameterCount; p++) {
                 Type parameterType = parameterTypes[p];
-                if (Utils.hasUnresolvableType(parameterType)) {
-                    throw parameterError(p, "Parameter type must not include a type variable or wildcard: %s",
-                            parameterType);
+                if (Utils.getRawType(parameterType) != Continuation.class) {
+                    if (Utils.hasUnresolvableType(parameterType)) {
+                        throw parameterError(p, "Parameter type must not include a type variable or wildcard: %s",
+                                parameterType);
+                    }
                 }
-
                 Annotation[] parameterAnnotations = parameterAnnotationsArray[p];
                 if (parameterAnnotations == null) {
                     throw parameterError(p, "No Retrofit annotation found.");
                 }
 
-                parameterHandlers[p] = parseParameter(p, parameterType, parameterAnnotations);
+                parameterHandlers[p] = parseParameter(p, parameterType, parameterAnnotations, p == lastParameter);
             }
+
             if (relativeUrl == null && !gotUrl) {
                 throw methodError("Missing either URL or @Url parameter.");
             }
+
+            Type returnType = method.getGenericReturnType();
+            Annotation[] annotations = method.getAnnotations();
+            Type adapterType = returnType;
+
+            //解析参数后发现是协程的SuspendFunction
+            if (isKotlinSuspendFunction) {
+                Type[] parameterTypes = method.getGenericParameterTypes();
+                Type responseType =
+                        Utils.getParameterLowerBound(
+                                0, (ParameterizedType) parameterTypes[parameterTypes.length - 1]);
+                //修改adapterType
+                adapterType = new Utils.ParameterizedTypeImpl(null, SuspendCall.class, responseType);
+            }
+
+            callAdapter = createCallAdapter(adapterType, annotations);
+            responseType = this.callAdapter.responseType();
+
             return new ServiceMethod<>(this);
         }
 
@@ -136,7 +172,7 @@ final class ServiceMethod<R, T> {
         }
 
         private ParameterHandler<?> parseParameter(
-                int p, Type parameterType, Annotation[] annotations) {
+                int p, Type parameterType, Annotation[] annotations, boolean allowContinuation) {
             ParameterHandler<?> result = null;
             for (Annotation annotation : annotations) {
                 ParameterHandler<?> annotationAction = parseParameterAnnotation(
@@ -150,10 +186,20 @@ final class ServiceMethod<R, T> {
                 result = annotationAction;
             }
             if (result == null) {
-                if (Utils.getRawType(parameterType) == Context.class) {
-                    return new ParameterHandler.ContextParameter();
-                } else if (Utils.getRawType(parameterType) == Fragment.class) {
-                    return new ParameterHandler.FragmentParameter();
+                if (allowContinuation) {
+                    try {
+                        if (Utils.getRawType(parameterType) == Continuation.class) {
+                            isKotlinSuspendFunction = true;
+                            return null;
+                        }
+                    } catch (NoClassDefFoundError ignored) {
+                    }
+                } else {
+                    if (Utils.getRawType(parameterType) == Context.class) {
+                        return new ParameterHandler.ContextParameter();
+                    } else if (Utils.getRawType(parameterType) == Fragment.class) {
+                        return new ParameterHandler.FragmentParameter();
+                    }
                 }
                 throw parameterError(p, "No RouterRetrofit annotation found.");
             }
@@ -180,14 +226,14 @@ final class ServiceMethod<R, T> {
             } else if (annotation instanceof RequestCode) {
                 if (type == Integer.class || type == int.class) {
                     return new ParameterHandler.RequestCode();
-                }else {
+                } else {
                     throw parameterError(p,
                             "@RequestCode must be int");
                 }
-            }else if (annotation instanceof Action) {
+            } else if (annotation instanceof Action) {
                 if (type == String.class) {
                     return new ParameterHandler.Action();
-                }else {
+                } else {
                     throw parameterError(p,
                             "@Action must be String");
                 }
@@ -235,13 +281,13 @@ final class ServiceMethod<R, T> {
             return null; // Not a RouterRetrofit annotation.
         }
 
-        private CallAdapter<T, R> createCallAdapter() {
-            Type returnType = method.getGenericReturnType();
+        private CallAdapter<T, R> createCallAdapter(Type returnType, Annotation[] annotations) {
+//            Type returnType = method.getGenericReturnType();
             if (Utils.hasUnresolvableType(returnType)) {
                 throw methodError(
                         "Method return type must not include a type variable or wildcard: %s", returnType);
             }
-            Annotation[] annotations = method.getAnnotations();
+//            Annotation[] annotations = method.getAnnotations();
             try {
                 //noinspection unchecked
                 return (CallAdapter<T, R>) retrofit.callAdapter(returnType, annotations);

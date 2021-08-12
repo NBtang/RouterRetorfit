@@ -48,7 +48,7 @@ public final class RouterRetrofit {
                         ServiceMethod<Object, Object> serviceMethod =
                                 (ServiceMethod<Object, Object>) loadServiceMethod(method);
                         ServiceCall<Object> serviceCall = new ServiceCall<>(serviceMethod, args);
-                        return serviceMethod.adapt(serviceCall);
+                        return serviceMethod.adapt(serviceCall,args);
                     }
                 });
     }
