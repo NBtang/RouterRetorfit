@@ -13,6 +13,8 @@ import java.util.List;
 import java.util.Map;
 import java.util.concurrent.ConcurrentHashMap;
 
+import me.laotang.router.route.RouteProvider;
+
 import static java.util.Collections.unmodifiableList;
 import static me.laotang.router.Utils.checkNotNull;
 
@@ -20,12 +22,13 @@ public final class RouterRetrofit {
     private final Map<Method, ServiceMethod<?, ?>> serviceMethodCache = new ConcurrentHashMap<>();
 
     final List<CallAdapter.Factory> callAdapterFactories;
+    final List<RouteProvider.Factory> routeProviderFactories;
     final RawCall.Factory callFactory;
 
-    RouterRetrofit(RawCall.Factory callFactory, List<CallAdapter.Factory> callAdapterFactories
-    ) {
+    RouterRetrofit(RawCall.Factory callFactory, List<CallAdapter.Factory> callAdapterFactories, List<RouteProvider.Factory> routeProviderFactories) {
         this.callFactory = callFactory;
         this.callAdapterFactories = callAdapterFactories; // Copy+unmodifiable at call site.
+        this.routeProviderFactories = routeProviderFactories; // Copy+unmodifiable at call site.
     }
 
     public List<CallAdapter.Factory> callAdapterFactories() {
@@ -48,7 +51,7 @@ public final class RouterRetrofit {
                         ServiceMethod<Object, Object> serviceMethod =
                                 (ServiceMethod<Object, Object>) loadServiceMethod(method);
                         ServiceCall<Object> serviceCall = new ServiceCall<>(serviceMethod, args);
-                        return serviceMethod.adapt(serviceCall,args);
+                        return serviceMethod.adapt(serviceCall, args);
                     }
                 });
     }
@@ -100,12 +103,31 @@ public final class RouterRetrofit {
         throw new IllegalArgumentException(builder.toString());
     }
 
+    public RouteProvider routeProvider(String routePath) {
+        return nextRouteProvider(null, routePath);
+    }
+
+    public RouteProvider nextRouteProvider(RouteProvider.Factory skipPast, String routePath) {
+        checkNotNull(routePath, "routePath == null");
+
+        int start = routeProviderFactories.indexOf(skipPast) + 1;
+        for (int i = start, count = routeProviderFactories.size(); i < count; i++) {
+            RouteProvider routeProvider = routeProviderFactories.get(i).get(routePath);
+            if (routeProvider != null) {
+                return routeProvider;
+            }
+        }
+        return null;
+    }
+
     public RawCall.Factory callFactory() {
         return callFactory;
     }
 
     public static final class Builder {
         private final List<CallAdapter.Factory> callAdapterFactories = new ArrayList<>();
+
+        private final List<RouteProvider.Factory> routeProviderFactories = new ArrayList<>();
 
         public Builder addCallAdapterFactory(CallAdapter.Factory factory) {
             callAdapterFactories.add(checkNotNull(factory, "factory == null"));
@@ -116,14 +138,22 @@ public final class RouterRetrofit {
             return this.callAdapterFactories;
         }
 
+        public Builder addRouteProviderFactory(RouteProvider.Factory factory) {
+            routeProviderFactories.add(checkNotNull(factory, "factory == null"));
+            return this;
+        }
+
         public RouterRetrofit build(Context context) {
             RawCall.Factory callFactory = new RawCallFactory(context);
             List<CallAdapter.Factory> callAdapterFactories = new ArrayList<>(this.callAdapterFactories);
             callAdapterFactories.add(DefaultCallAdapterFactory.INSTANCE);
 
+            List<RouteProvider.Factory> routeProviderFactories = new ArrayList<>(this.routeProviderFactories);
+
             return new RouterRetrofit(
                     callFactory,
-                    unmodifiableList(callAdapterFactories)
+                    unmodifiableList(callAdapterFactories),
+                    unmodifiableList(routeProviderFactories)
             );
         }
     }

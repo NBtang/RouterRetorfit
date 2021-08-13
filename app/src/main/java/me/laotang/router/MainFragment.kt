@@ -10,14 +10,7 @@ import kotlinx.coroutines.launch
 class MainFragment : Fragment() {
     override fun onActivityCreated(savedInstanceState: Bundle?) {
         super.onActivityCreated(savedInstanceState)
-        val routerRetrofit = RouterRetrofit.Builder()
-            .build(requireContext())
-        val routerService = routerRetrofit.create(RouterService::class.java)
-//        routerService.startTestUri(requireContext(),"app://test.uri.activity",22,Intent.ACTION_VIEW)
-        lifecycleScope.launch {
-            routerService.startTestUriSuspend(requireContext(),"app://test.uri.activity")
-        }
-//        routerService.startTestUri(this, "app://test.uri.activity/fragment",22,Intent.ACTION_VIEW)
+
     }
 
     override fun onActivityResult(requestCode: Int, resultCode: Int, data: Intent?) {
